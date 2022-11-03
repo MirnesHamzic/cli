@@ -1,6 +1,5 @@
 const { join } = require('path')
 const hgi = require('hosted-git-info')
-const semver = require('semver')
 const pacote = require('pacote')
 const log = require('proc-log')
 const tar = require('tar')
@@ -42,7 +41,15 @@ const createNodeTarball = async ({ mani, registryOnly, tag, dir: extractDir }) =
   return tarball
 }
 
-const main = async (spec, opts) => withTempDir(CWD, async (tmpDir) => {
+const main = async (spec, branch = 'main', opts) => withTempDir(CWD, async (tmpDir) => {
+  if (!spec) {
+    throw new Error('`spec` is required as the first argument')
+  }
+
+  if (!branch) {
+    throw new Error('`branch` is required as the second argument')
+  }
+
   const { dryRun, registryOnly } = opts
 
   const mani = await pacote.manifest(`npm@${spec}`, { preferOnline: true })
@@ -67,11 +74,8 @@ const main = async (spec, opts) => withTempDir(CWD, async (tmpDir) => {
   })
 
   const base = {
-    // we used to send PRs sometimes for old versions to the 14.x staging
-    // branch. this might not be needed anymore, but this is how we
-    // would do it, if we needed to send a PR for backport fixes
-    branch: semver.major(mani.version) <= 8 ? '14.x-staging' : 'main',
     remote: 'origin',
+    branch: /^\d+$/.test(branch) ? `v${branch}.x-staging` : branch,
     host: hgi.fromUrl(await gitNode('remote', 'get-url', 'origin', { out: true })),
   }
   log.silly(base)
@@ -118,4 +122,4 @@ const main = async (spec, opts) => withTempDir(CWD, async (tmpDir) => {
   return gh(...prArgs, '-F', '-', { cwd: NODE_DIR, input: notes, out: true })
 })
 
-run(({ argv, ...opts }) => main(argv.remain[0], opts))
+run(({ argv, ...opts }) => main(argv.remain[0], argv.remain[1], opts))
