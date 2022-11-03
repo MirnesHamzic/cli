@@ -43,7 +43,7 @@ const createNodeTarball = async ({ mani, registryOnly, tag, dir: extractDir }) =
 }
 
 const main = async (spec, opts) => withTempDir(CWD, async (tmpDir) => {
-  const { dryRun, registryOnly, skipCheckout } = opts
+  const { dryRun, registryOnly } = opts
 
   const mani = await pacote.manifest(`npm@${spec}`, { preferOnline: true })
 
@@ -59,9 +59,7 @@ const main = async (spec, opts) => withTempDir(CWD, async (tmpDir) => {
     mani,
     dir: tmpDir,
     registryOnly,
-    // the only reason this is optional is for testing when updating this script.
-    // if we checkout an older tag, it won't have the updates we are testing.
-    tag: skipCheckout ? null : head.tag,
+    tag: head.tag,
   })
 
   await access(NODE_DIR, constants.F_OK).catch(() => {
