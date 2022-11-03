@@ -3,8 +3,7 @@
 const { relative, dirname, resolve, join, normalize } = require('path')
 
 const rpj = require('read-package-json-fast')
-const { promisify } = require('util')
-const readdir = promisify(require('readdir-scoped-modules'))
+const { readdirScoped } = require('@npmcli/fs')
 const walkUp = require('walk-up-path')
 const ancestorPath = require('common-ancestor-path')
 const treeCheck = require('../tree-check.js')
@@ -362,7 +361,7 @@ module.exports = cls => class ActualLoader extends cls {
   async [_loadFSChildren] (node) {
     const nm = resolve(node.realpath, 'node_modules')
     try {
-      const kids = await readdir(nm)
+      const kids = await readdirScoped(nm)
       return Promise.all(
         // ignore . dirs and retired scoped package folders
         kids.filter(kid => !/^(@[^/]+\/)?\./.test(kid))
@@ -412,7 +411,7 @@ module.exports = cls => class ActualLoader extends cls {
           }
 
           const entries = nmContents.get(p) ||
-            await readdir(p + '/node_modules').catch(() => [])
+            await readdirScoped(p + '/node_modules').catch(() => [])
           nmContents.set(p, entries)
           if (!entries.includes(name)) {
             continue

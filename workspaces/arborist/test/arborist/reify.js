@@ -52,6 +52,17 @@ const mocks = {
 
       return fs.promises.mkdir(...args)
     },
+    rename: async (...args) => {
+      if (failRename) {
+        throw failRename
+      } else if (failRenameOnce) {
+        const er = failRenameOnce
+        failRenameOnce = null
+        throw er
+      } else {
+        return fs.promises.rename(...args)
+      }
+    },
     rm: async (...args) => {
       if (failRm) {
         throw new Error('rm fail')
@@ -74,8 +85,8 @@ This is a one-time fix-up, please be patient...
 ]
 
 // need this to be injected so that it doesn't pull from main cache
-const moveFile = t.mock('@npmcli/move-file', { fs: fsMock })
-mocks['@npmcli/move-file'] = moveFile
+const { moveFile } = t.mock('@npmcli/fs', { 'fs/promises': mocks['fs/promises'] })
+mocks['@npmcli/fs'] = { moveFile }
 
 // track the warnings that are emitted.  returns a function that removes
 // the listener and provides the list of what it saw.
