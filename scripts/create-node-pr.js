@@ -92,7 +92,7 @@ const tokenRemoteUrl = ({ host, token }) => {
 }
 
 const main = async (spec, branch = 'main', opts) => withTempDir(CWD, async (tmpDir) => {
-  const { NODE_PULL_REQUEST_TOKEN } = process.env
+  const { GITHUB_TOKEN } = process.env
   const { dryRun, registryOnly, localTest } = opts
 
   if (!spec) {
@@ -103,8 +103,8 @@ const main = async (spec, branch = 'main', opts) => withTempDir(CWD, async (tmpD
     throw new Error('`branch` is required as the second argument')
   }
 
-  if (!NODE_PULL_REQUEST_TOKEN) {
-    throw new Error(`process.env.NODE_PULL_REQUEST_TOKEN is required`)
+  if (!GITHUB_TOKEN) {
+    throw new Error(`process.env.GITHUB_TOKEN is required`)
   }
 
   await access(NODE_DIR, constants.F_OK).catch(() => {
@@ -130,7 +130,7 @@ const main = async (spec, branch = 'main', opts) => withTempDir(CWD, async (tmpD
   const npmHost = hgi.fromUrl(NODE_FORK)
   const npmTag = `v${npmVersion}`
   const npmBranch = `npm-${npmTag}`
-  const npmRemoteUrl = tokenRemoteUrl({ host: npmHost, token: NODE_PULL_REQUEST_TOKEN })
+  const npmRemoteUrl = tokenRemoteUrl({ host: npmHost, token: GITHUB_TOKEN })
   const npmMessage = (v = npmVersion) => `deps: upgrade npm to ${v}`
 
   const tarball = await createNodeTarball({
@@ -265,5 +265,5 @@ const main = async (spec, branch = 'main', opts) => withTempDir(CWD, async (tmpD
 })
 
 run(({ argv, ...opts }) => main(argv.remain[0], argv.remain[1], opts), {
-  redact: new RegExp(process.env.NODE_PULL_REQUEST_TOKEN, 'g'),
+  redact: new RegExp(process.env.GITHUB_TOKEN, 'g'),
 })

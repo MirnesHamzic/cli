@@ -26,8 +26,7 @@ jobs:
           path: node
       - name: Create Node Pull Request
         env:
-          GITHUB_TOKEN: $\{{ secrets.GITHUB_TOKEN }}
-          NODE_PULL_REQUEST_TOKEN: $\{{ secrets.NODE_PULL_REQUEST_TOKEN }}
+          GITHUB_TOKEN: $\{{ secrets.NODE_PULL_REQUEST_TOKEN }}
         run: |
           DRY_RUN=$([ -z "$\{{ inputs.dryRun }}" ] && echo "" || echo "--dry-run")
           node scripts/create-node-pr.js $\{{ inputs.spec }} $\{{ inputs.branch }} "$DRY_RUN"

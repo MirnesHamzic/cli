@@ -47,7 +47,7 @@ const getArgs = (allArgs) => {
 const spawn = async (cmd, ...allArgs) => {
   const {
     args,
-    opts: { ok, input, out, lines, quiet, ...opts },
+    opts: { ok, input, out, lines, quiet, env, ...opts },
   } = getArgs(allArgs)
 
   log.info('spawn', `${cmd} ${args.join(' ')}`)
@@ -58,6 +58,7 @@ const spawn = async (cmd, ...allArgs) => {
       stdioString: true,
       stdio: quiet || out || lines ? 'pipe' : 'inherit',
       cwd: CWD,
+      env: { ...process.env, ...env },
       ...opts,
     }
     const proc = cmd === 'git' ? npmGit.spawn(args, spawnOpts) : promiseSpawn(cmd, args, spawnOpts)
