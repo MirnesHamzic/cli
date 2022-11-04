@@ -7,6 +7,7 @@ const fsp = require('fs/promises')
 const { cp, withTempDir, access, constants } = require('@npmcli/fs')
 const { CWD, run, spawn, git, fs, gh } = require('./util.js')
 
+const NODE_FORK = 'npm/node'
 // this script expects node to already be cloned to a directory at the cli root named "node"
 const NODE_DIR = join(CWD, 'node')
 const gitNode = spawn.create('git', { cwd: NODE_DIR })
@@ -27,7 +28,6 @@ const createNodeTarball = async ({ mani, registryOnly, tag, dir: extractDir }) =
   await fs.rimraf(tarball)
 
   // checkout the tag since we need to get files from source.
-  await git.dirty()
   await git('checkout', tag)
   // currently there is an empty .npmrc file in the deps/npm dir in the node repo
   // i do not know why and it might not be used but in order to minimize any
@@ -74,9 +74,18 @@ const main = async (spec, branch = 'main', opts) => withTempDir(CWD, async (tmpD
     throw new Error(`process.env.GITHUB_TOKEN is required`)
   }
 
-  const mani = await pacote.manifest(`npm@${spec}`, { preferOnline: true })
+  await access(NODE_DIR, constants.F_OK).catch(() => {
+    throw new Error(`node repo must be checked out to \`${NODE_DIR}\` to continue`)
+  })
 
-  const headHost = hgi.fromUrl('npm/node')
+  await gh('repo', 'view', NODE_FORK, { quiet: true }).catch(() => {
+    throw new Error(`node repo must be forked to ${NODE_FORK}`)
+  })
+
+  await git.dirty()
+
+  const mani = await pacote.manifest(`npm@${spec}`, { preferOnline: true })
+  const headHost = hgi.fromUrl(NODE_FORK)
   const head = {
     tag: `v${mani.version}`,
     branch: `npm-v${mani.version}`,
@@ -93,10 +102,6 @@ const main = async (spec, branch = 'main', opts) => withTempDir(CWD, async (tmpD
     tag: head.tag,
   })
 
-  await access(NODE_DIR, constants.F_OK).catch(() => {
-    throw new Error(`node repo must be checked out to \`${NODE_DIR}\` to continue`)
-  })
-
   const base = {
     remote: 'origin',
     branch: /^\d+$/.test(branch) ? `v${branch}.x-staging` : branch,
@@ -104,7 +109,6 @@ const main = async (spec, branch = 'main', opts) => withTempDir(CWD, async (tmpD
   }
   log.silly(base)
 
-  await gh('repo', 'fork', base.host.path(), '--org', head.host.user, { quiet: true, ok: true })
   await gitNode('fetch', base.remote)
   await gitNode('checkout', base.branch)
   await gitNode('reset', '--hard', `${base.remote}/${base.branch}`)
@@ -122,7 +126,7 @@ const main = async (spec, branch = 'main', opts) => withTempDir(CWD, async (tmpD
 
   await gitNode('remote', 'rm', head.host.user, { ok: true })
   await gitNode('remote', 'add', head.host.user, head.remoteUrl)
-  await gitNode('push', head.host.user, head.branch, '--force-with-lease')
+  await gitNode('push', head.host.user, head.branch, '--force')
 
   const notes = await gh.json('release', 'view', head.tag, 'body')
   log.silly('body', notes)
