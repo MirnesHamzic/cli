@@ -3,6 +3,7 @@ const hgi = require('hosted-git-info')
 const pacote = require('pacote')
 const log = require('proc-log')
 const tar = require('tar')
+const fsp = require('fs/promises')
 const { cp, withTempDir, access, constants } = require('@npmcli/fs')
 const { CWD, run, spawn, git, fs, gh } = require('./util.js')
 
@@ -27,8 +28,13 @@ const createNodeTarball = async ({ mani, registryOnly, tag, dir: extractDir }) =
 
   // checkout the tag since we need to get files from source.
   await git.dirty()
-  tag && await git('checkout', tag)
-  for (const path of ['.npmrc', 'tap-snapshots/', 'test/']) {
+  await git('checkout', tag)
+  // currently there is an empty .npmrc file in the deps/npm dir in the node repo
+  // i do not know why and it might not be used but in order to minimize any
+  // unnecessary churn, let's create that file to match the old process
+  await fsp.writeFile(join(extractDir, '.npmrc'), '', 'utf-8')
+  // copy our test dirs so that tests can be run
+  for (const path of ['tap-snapshots/', 'test/']) {
     await cp(join(CWD, path), join(extractDir, path), { recursive: true })
   }
 
@@ -39,6 +45,17 @@ const createNodeTarball = async ({ mani, registryOnly, tag, dir: extractDir }) =
   }, ['.'])
 
   return tarball
+}
+
+const tokenRemoteUrl = ({ host, token }) => {
+  // this is a remote url that uses a github token as the username
+  // in order to authenticate with github
+  const headRemoteUrl = new URL(host.https())
+  headRemoteUrl.username = token
+  // we have to manually change the protocol. the whatwg url spec
+  // does not allow changing a special protocol to another one
+  // but the protocol has to be `https:` without the `git+`
+  return headRemoteUrl.toString().replace('git+https:', 'https:')
 }
 
 const main = async (spec, branch = 'main', opts) => withTempDir(CWD, async (tmpDir) => {
@@ -60,13 +77,11 @@ const main = async (spec, branch = 'main', opts) => withTempDir(CWD, async (tmpD
   const mani = await pacote.manifest(`npm@${spec}`, { preferOnline: true })
 
   const headHost = hgi.fromUrl('npm/node')
-  const headRemoteUrl = new URL(headHost.https())
-  headRemoteUrl.username = GITHUB_TOKEN
   const head = {
     tag: `v${mani.version}`,
     branch: `npm-v${mani.version}`,
     host: headHost,
-    remoteUrl: headRemoteUrl.toString().replace('git+https:', 'https:'),
+    remoteUrl: tokenRemoteUrl({ host: headHost, token: GITHUB_TOKEN }),
     message: `deps: upgrade npm to ${mani.version}`,
   }
   log.silly(head)
@@ -105,10 +120,8 @@ const main = async (spec, branch = 'main', opts) => withTempDir(CWD, async (tmpD
   await gitNode('commit', '-m', head.message)
   await gitNode('rebase', '--whitespace', 'fix', base.branch)
 
-  await gitNode('remote', '-v')
   await gitNode('remote', 'rm', head.host.user, { ok: true })
-  await gitNode('remote', 'add', head.host.user, head.remoteUrl, { ok: true })
-  await gitNode('remote', '-v')
+  await gitNode('remote', 'add', head.host.user, head.remoteUrl)
   await gitNode('push', head.host.user, head.branch, '--force-with-lease')
 
   const notes = await gh.json('release', 'view', head.tag, 'body')
