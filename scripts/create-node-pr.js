@@ -66,7 +66,7 @@ const main = async (spec, branch = 'main', opts) => withTempDir(CWD, async (tmpD
     tag: `v${mani.version}`,
     branch: `npm-v${mani.version}`,
     host: headHost,
-    remoteUrl: headRemoteUrl.toString(),
+    remoteUrl: headRemoteUrl.toString().replace('git+https:', 'https:'),
     message: `deps: upgrade npm to ${mani.version}`,
   }
   log.silly(head)
@@ -105,8 +105,10 @@ const main = async (spec, branch = 'main', opts) => withTempDir(CWD, async (tmpD
   await gitNode('commit', '-m', head.message)
   await gitNode('rebase', '--whitespace', 'fix', base.branch)
 
+  await gitNode('remote', '-v')
   await gitNode('remote', 'rm', head.host.user, { ok: true })
   await gitNode('remote', 'add', head.host.user, head.remoteUrl, { ok: true })
+  await gitNode('remote', '-v')
   await gitNode('push', head.host.user, head.branch, '--force-with-lease')
 
   const notes = await gh.json('release', 'view', head.tag, 'body')
