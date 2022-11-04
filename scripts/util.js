@@ -62,6 +62,7 @@ const spawn = async (cmd, ...allArgs) => {
     }
     const proc = cmd === 'git' ? npmGit.spawn(args, spawnOpts) : promiseSpawn(cmd, args, spawnOpts)
     if (input && proc.stdin) {
+      log.silly('input', input)
       proc.stdin.write(input)
       proc.stdin.end()
     }
@@ -70,12 +71,12 @@ const spawn = async (cmd, ...allArgs) => {
     if (!ok) {
       throw err
     }
-    log.info('suppressed error', err)
+    log.silly('suppressed error', err)
   }
 
   if (res && res.stdout) {
     res.stdout = res.stdout.toString().trim()
-    if (res.stdout) {
+    if (res.stdout && !quiet) {
       log.silly('stdout', res.stdout)
     }
   }
@@ -126,16 +127,17 @@ git.dirty = () => npmGit.isClean({ cwd: CWD }).then(async r => {
 })
 
 const gh = spawn.create('gh')
-gh.json = async (...args) => {
+gh.json = async (..._args) => {
+  const { args, opts } = getArgs(_args)
   const keys = args.pop()
-  let data = await gh(...args, '--json', keys, { out: true }).then(JSON.parse)
+  let data = await gh(...args, '--json', keys, { ...opts, out: true }).then(JSON.parse)
   if (keys.split(',').length === 1) {
     data = data[keys]
   }
   return data
 }
 
-const run = async (main) => {
+const run = async (main, { redact } = {}) => {
   const argv = {}
   for (const [k, v] of Object.entries(nopt({}, {}, process.argv))) {
     argv[k] = v
@@ -143,11 +145,13 @@ const run = async (main) => {
     argv[k.replace(/-([a-z])/g, (_, c) => c.toUpperCase())] = v
   }
 
+  const defaultLevels = ['error', 'warn', 'info']
   process.on('log', (l, ...args) => {
-    if (argv.debug || process.env.CI || l === 'error') {
+    if (argv.debug || process.env.CI || defaultLevels.includes(l)) {
       for (const line of formatWithOptions({ colors: true }, ...args).split('\n')) {
+        const redacted = redact ? line.replace(redact, '***') : line
         // eslint-disable-next-line no-console
-        console.error(l.slice(0, 4).toUpperCase(), line)
+        console.error(l.slice(0, 4).toUpperCase(), redacted)
       }
     }
   })

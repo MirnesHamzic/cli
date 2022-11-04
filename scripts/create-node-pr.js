@@ -1,6 +1,7 @@
 const { join } = require('path')
 const hgi = require('hosted-git-info')
 const pacote = require('pacote')
+const semver = require('semver')
 const log = require('proc-log')
 const tar = require('tar')
 const fsp = require('fs/promises')
@@ -12,7 +13,7 @@ const NODE_FORK = 'npm/node'
 const NODE_DIR = join(CWD, 'node')
 const gitNode = spawn.create('git', { cwd: NODE_DIR })
 
-const createNodeTarball = async ({ mani, registryOnly, tag, dir: extractDir }) => {
+const createNodeTarball = async ({ mani, registryOnly, localTest, tag, dir: extractDir }) => {
   const tarball = join(extractDir, 'npm-node.tgz')
   await pacote.tarball.file(mani._from, tarball, { resolved: mani._resolved })
 
@@ -28,16 +29,26 @@ const createNodeTarball = async ({ mani, registryOnly, tag, dir: extractDir }) =
   await fs.rimraf(tarball)
 
   // checkout the tag since we need to get files from source.
-  await git('checkout', tag)
+  if (!localTest) {
+    try {
+      await git('checkout', tag)
+    } catch (err) {
+      log.error('Use the `--local-test` flag to avoid checking out the tag')
+      throw err
+    }
+  }
   // currently there is an empty .npmrc file in the deps/npm dir in the node repo
   // i do not know why and it might not be used but in order to minimize any
   // unnecessary churn, let's create that file to match the old process
   await fsp.writeFile(join(extractDir, '.npmrc'), '', 'utf-8')
+
   // copy our test dirs so that tests can be run
   for (const path of ['tap-snapshots/', 'test/']) {
     await cp(join(CWD, path), join(extractDir, path), { recursive: true })
   }
 
+  // recreate the tarball as closely as possible to how we would before publishing
+  // to the registry. the only difference here is the extra files we put in the dir
   await tar.c({
     ...pacote.DirFetcher.tarCreateOptions(mani),
     cwd: extractDir,
@@ -45,6 +56,23 @@ const createNodeTarball = async ({ mani, registryOnly, tag, dir: extractDir }) =
   }, ['.'])
 
   return tarball
+}
+
+const getPrBody = async (rawBody) => {
+  const { remark } = await import('remark')
+  const { default: remarkGfm } = await import('remark-gfm')
+  const { default: remarkGithub } = await import('remark-github')
+
+  return remark()
+    .use(remarkGfm)
+    .use(remarkGithub, {
+      repository: 'npm/cli',
+      buildUrl (values, defaultBuildUrl) {
+        return values.type === 'mention' ? false : defaultBuildUrl(values)
+      },
+    })
+    .process(rawBody)
+    .then(v => String(v))
 }
 
 const tokenRemoteUrl = ({ host, token }) => {
@@ -59,8 +87,8 @@ const tokenRemoteUrl = ({ host, token }) => {
 }
 
 const main = async (spec, branch = 'main', opts) => withTempDir(CWD, async (tmpDir) => {
-  const { GITHUB_TOKEN } = process.env
-  const { dryRun, registryOnly } = opts
+  const { NODE_PULL_REQUEST_TOKEN } = process.env
+  const { dryRun, registryOnly, localTest } = opts
 
   if (!spec) {
     throw new Error('`spec` is required as the first argument')
@@ -70,85 +98,171 @@ const main = async (spec, branch = 'main', opts) => withTempDir(CWD, async (tmpD
     throw new Error('`branch` is required as the second argument')
   }
 
-  if (!GITHUB_TOKEN) {
-    throw new Error(`process.env.GITHUB_TOKEN is required`)
+  if (!NODE_PULL_REQUEST_TOKEN) {
+    throw new Error(`process.env.NODE_PULL_REQUEST_TOKEN is required`)
   }
 
   await access(NODE_DIR, constants.F_OK).catch(() => {
     throw new Error(`node repo must be checked out to \`${NODE_DIR}\` to continue`)
   })
 
-  await gh('repo', 'view', NODE_FORK, { quiet: true }).catch(() => {
+  await gh.json('repo', 'view', NODE_FORK, 'url').catch(() => {
     throw new Error(`node repo must be forked to ${NODE_FORK}`)
   })
 
-  await git.dirty()
+  await git.dirty().catch((er) => {
+    if (localTest) {
+      return log.info('Skipping git dirty check due to `--local-test` flag')
+    }
+    throw er
+  })
 
   const mani = await pacote.manifest(`npm@${spec}`, { preferOnline: true })
-  const headHost = hgi.fromUrl(NODE_FORK)
-  const head = {
-    tag: `v${mani.version}`,
-    branch: `npm-v${mani.version}`,
-    host: headHost,
-    remoteUrl: tokenRemoteUrl({ host: headHost, token: GITHUB_TOKEN }),
-    message: `deps: upgrade npm to ${mani.version}`,
-  }
-  log.silly(head)
+  const packument = await pacote.packument('npm', { preferOnline: true })
+  const npmVersions = Object.keys(packument.versions).sort(semver.rcompare)
+
+  const npmVersion = semver.parse(mani.version)
+  const npmHost = hgi.fromUrl(NODE_FORK)
+  const npmTag = `v${npmVersion}`
+  const npmBranch = `npm-${npmTag}`
+  const npmRemoteUrl = tokenRemoteUrl({ host: npmHost, token: NODE_PULL_REQUEST_TOKEN })
+  const npmMessage = (v = npmVersion) => `deps: upgrade npm to ${v}`
 
   const tarball = await createNodeTarball({
     mani,
+    tag: npmTag,
     dir: tmpDir,
     registryOnly,
-    tag: head.tag,
+    localTest,
   })
 
-  const base = {
-    remote: 'origin',
-    branch: /^\d+$/.test(branch) ? `v${branch}.x-staging` : branch,
-    host: hgi.fromUrl(await gitNode('remote', 'get-url', 'origin', { out: true })),
+  const nodeRemote = 'origin'
+  const nodeBranch = /^\d+$/.test(branch) ? `v${branch}.x-staging` : branch
+  const nodeHost = hgi.fromUrl(await gitNode('remote', 'get-url', nodeRemote, { out: true }))
+  const nodePrArgs = ['pr', '-R', nodeHost.path()]
+
+  await gitNode('fetch', nodeRemote)
+  await gitNode('checkout', nodeBranch)
+  await gitNode('reset', '--hard', `${nodeRemote}/${nodeBranch}`)
+
+  const nodeNpmPath = join('deps', 'npm')
+  const nodeNpmDir = join(NODE_DIR, nodeNpmPath)
+  const nodeNpmVersion = require(join(nodeNpmDir, 'package.json')).version
+
+  // this is the range of all versions included in this update based
+  // on the current version of npm in node currently. we use this
+  // to build a list of all release notes and to close any existing PRs
+  const newNpmVersions = npmVersions.slice(
+    npmVersions.indexOf(npmVersion.toString()),
+    npmVersions.indexOf(nodeNpmVersion)
+  )
+    .map((v) => semver.parse(v))
+    .filter((version) => version.major === npmVersion.major)
+
+  // get a list of all versions changelogs to add to the body of the PR
+  // do this before we checkout our branch and make any changes
+  const npmUpdates = await Promise.all(newNpmVersions.map(async (version) => {
+    // dont include prereleases unless we are updating to a prerlease since we
+    // manually put all prerelease notes into the first stable major version
+    if (version.prerelease.length && !npmVersion.prerelease.length) {
+      return null
+    }
+    return {
+      version,
+      body: await gh.json('release', 'view', `v${version}`, 'body', { quiet: true }),
+    }
+  })).then(r => r.filter(Boolean))
+
+  log.info('npm versions', newNpmVersions.map(v => v.toString()))
+  log.info('npm pr updates', npmUpdates.map(u => u.version.toString()))
+
+  await gitNode('branch', '-D', npmBranch, { ok: true })
+  await gitNode('checkout', '-b', npmBranch)
+  await fs.clean(nodeNpmDir)
+  await tar.x({ strip: 1, file: tarball, cwd: nodeNpmDir })
+
+  await gitNode('add', '-A', nodeNpmPath)
+  await gitNode('commit', '-m', npmMessage())
+  await gitNode('rebase', '--whitespace', 'fix', nodeBranch)
+
+  await gitNode('remote', 'rm', npmHost.user, { ok: true })
+  await gitNode('remote', 'add', npmHost.user, npmRemoteUrl)
+  await gitNode('push', npmHost.user, npmBranch, '--force')
+
+  const [existingPr, closePrs] = await gh.json(...nodePrArgs, 'list',
+    '-S', `in:title "${npmMessage('')}"`,
+    'number,title,url'
+  ).then((prs) => {
+    log.info('Found other PRs', prs)
+    let existing = null
+    const close = []
+    for (const pr of prs) {
+      pr.version = pr.title.replace(npmMessage(''), '').trim()
+      log.silly('checking existing PR', pr)
+      if (!existing && pr.version === npmVersion.toString()) {
+        existing = pr
+        continue
+      }
+      if (newNpmVersions.some(version => version.toString() === pr.version)) {
+        close.push(pr)
+      }
+    }
+    return [existing, close]
+  })
+
+  log.info('Found exisiting PR', existingPr)
+  log.info('Found PRs to close', closePrs)
+
+  // TODO: add links to relevant CI and CITGM runs once we no longer include our tests
+  let prHeader = 'This pull request contains the following `npm` releases:\n'
+  for (const npmUpdate of npmUpdates) {
+    prHeader += ` - \`${npmUpdate.version}\`\n`
   }
-  log.silly(base)
-
-  await gitNode('fetch', base.remote)
-  await gitNode('checkout', base.branch)
-  await gitNode('reset', '--hard', `${base.remote}/${base.branch}`)
-  await gitNode('branch', '-D', head.branch, { ok: true })
-  await gitNode('checkout', '-b', head.branch)
-
-  const npmPath = join('deps', 'npm')
-  const npmDir = join(NODE_DIR, npmPath)
-  await fs.clean(npmDir)
-  await tar.x({ strip: 1, file: tarball, cwd: npmDir })
-
-  await gitNode('add', '-A', npmPath)
-  await gitNode('commit', '-m', head.message)
-  await gitNode('rebase', '--whitespace', 'fix', base.branch)
-
-  await gitNode('remote', 'rm', head.host.user, { ok: true })
-  await gitNode('remote', 'add', head.host.user, head.remoteUrl)
-  await gitNode('push', head.host.user, head.branch, '--force')
-
-  const notes = await gh.json('release', 'view', head.tag, 'body')
-  log.silly('body', notes)
+  if (closePrs.length) {
+    prHeader += '\nIt replaces the following existing pull requests:\n'
+    for (const closePr of closePrs) {
+      prHeader += ` - ${closePr.url}\n`
+    }
+  }
+  const prBody = await getPrBody(
+    [prHeader, ...npmUpdates.map(u => u.body)].map(b => b.trim()).join('\n---\n')
+  )
 
   const prArgs = [
-    'pr', 'create',
-    '-R', base.host.path(),
-    '-B', base.branch,
-    '-H', `${head.host.user}:${head.branch}`,
-    '-t', head.message,
+    ...nodePrArgs,
+    ...(existingPr
+      ? ['edit', existingPr.number]
+      : ['create', '-H', `${npmHost.user}:${npmBranch}`]
+    ),
+    '-B', nodeBranch,
+    '-t', npmMessage(),
   ]
 
   if (dryRun) {
     log.info(`gh ${prArgs.join(' ')}`)
-    const compare = `${base.branch}...${head.host.user}:${head.host.project}:${head.branch}`
-    const url = new URL(base.host.browse())
+    const compare = `${nodeBranch}...${npmHost.user}:${npmHost.project}:${npmBranch}`
+    const url = new URL(nodeHost.browse())
     url.pathname += `/compare/${compare}`
     url.searchParams.set('expand', '1')
-    return url.toString()
+    log.info(url.toString())
+    return prBody
   }
 
-  return gh(...prArgs, '-F', '-', { cwd: NODE_DIR, input: notes, out: true })
+  const newOrUpdatedPr = await gh(...prArgs, '-F', '-', { input: prBody, out: true })
+  const closeMessage = `Closing in favor of ${newOrUpdatedPr}`
+
+  for (const closePr of closePrs) {
+    log.info('Attempting to close PR', closePr.url)
+    try {
+      await gh(...nodePrArgs, 'close', closePr.number, '-c', closeMessage)
+    } catch (err) {
+      log.error('Could not close PR', err)
+    }
+  }
+
+  return newOrUpdatedPr
 })
 
-run(({ argv, ...opts }) => main(argv.remain[0], argv.remain[1], opts))
+run(({ argv, ...opts }) => main(argv.remain[0], argv.remain[1], opts), {
+  redact: new RegExp(process.env.NODE_PULL_REQUEST_TOKEN, 'g'),
+})
