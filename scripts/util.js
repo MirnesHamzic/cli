@@ -70,7 +70,7 @@ const spawn = async (cmd, ...allArgs) => {
     if (!ok) {
       throw err
     }
-    log.info('suppressed error', err.message)
+    log.info('suppressed error', err)
   }
 
   if (res && res.stdout) {
