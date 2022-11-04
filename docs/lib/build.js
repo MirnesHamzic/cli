@@ -27,6 +27,16 @@ const run = async ({ content, template, nav, man, html, md }) => {
     rmAll(man, html, md),
   ])
 
+  const options = {
+    template: templateFile,
+    unified: await import('unified').then(r => r.unified),
+    remarkParse: await import('remark-parse').then(r => r.default),
+    remarkGfm: await import('remark-gfm').then(r => r.default),
+    remarkRehype: await import('remark-rehype').then(r => r.default),
+    rehypeStringify: await import('rehype-stringify').then(r => r.default),
+    remarkMan: await import('remark-man').then(r => r.default),
+  }
+
   const sources = await Promise.all(contentPaths.map(async (childPath) => {
     const name = basename(childPath, DOC_EXT)
     const fullPath = join(content, childPath)
@@ -61,7 +71,7 @@ const run = async ({ content, template, nav, man, html, md }) => {
         github_path: 'docs/content',
       },
       frontmatter,
-      template: templateFile,
+      ...options,
     })
 
     const transformedSrc = applyTransforms(body, [
