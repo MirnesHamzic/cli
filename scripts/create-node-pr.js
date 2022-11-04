@@ -63,16 +63,21 @@ const getPrBody = async (rawBody) => {
   const { default: remarkGfm } = await import('remark-gfm')
   const { default: remarkGithub } = await import('remark-github')
 
-  return remark()
+  const body = await remark()
     .use(remarkGfm)
     .use(remarkGithub, {
       repository: 'npm/cli',
-      buildUrl (values, defaultBuildUrl) {
-        return values.type === 'mention' ? false : defaultBuildUrl(values)
-      },
+      // dont link mentions, but anything else make the link an explicit referance to npm/cli
+      buildUrl: (values, buildUrl) => values.type === 'mention' ? false : buildUrl(values),
     })
     .process(rawBody)
-    .then(v => String(v))
+
+  // These comes from the releases so those link to the raw comparison between tags.
+  // Since we are putting this in a PR we can change those links back to the releases.
+  return String(body).replace(
+    /\/npm\/cli\/compare\/v[\w.-]+\.\.\.v([\w.-]+)/g,
+    '/npm/cli/releases/tag/v$1'
+  )
 }
 
 const tokenRemoteUrl = ({ host, token }) => {
@@ -169,7 +174,7 @@ const main = async (spec, branch = 'main', opts) => withTempDir(CWD, async (tmpD
     }
     return {
       version,
-      body: await gh.json('release', 'view', `v${version}`, 'body', { quiet: true }),
+      body: await gh.json('release', 'view', npmTag, 'body', { quiet: true }),
     }
   })).then(r => r.filter(Boolean))
 
@@ -189,7 +194,8 @@ const main = async (spec, branch = 'main', opts) => withTempDir(CWD, async (tmpD
   await gitNode('remote', 'add', npmHost.user, npmRemoteUrl)
   await gitNode('push', npmHost.user, npmBranch, '--force')
 
-  const [existingPr, closePrs] = await gh.json(...nodePrArgs, 'list',
+  const [existingPr, closePrs] = await gh.json(
+    ...nodePrArgs, 'list',
     '-S', `in:title "${npmMessage('')}"`,
     'number,title,url'
   ).then((prs) => {
@@ -201,9 +207,7 @@ const main = async (spec, branch = 'main', opts) => withTempDir(CWD, async (tmpD
       log.silly('checking existing PR', pr)
       if (!existing && pr.version === npmVersion.toString()) {
         existing = pr
-        continue
-      }
-      if (newNpmVersions.some(version => version.toString() === pr.version)) {
+      } else if (newNpmVersions.some(version => version.toString() === pr.version)) {
         close.push(pr)
       }
     }
@@ -214,7 +218,7 @@ const main = async (spec, branch = 'main', opts) => withTempDir(CWD, async (tmpD
   log.info('Found PRs to close', closePrs)
 
   // TODO: add links to relevant CI and CITGM runs once we no longer include our tests
-  let prHeader = 'This pull request contains the following `npm` releases:\n'
+  let prHeader = 'This pull request contains the changelogs of the following `npm` releases:\n'
   for (const npmUpdate of npmUpdates) {
     prHeader += ` - \`${npmUpdate.version}\`\n`
   }
@@ -229,14 +233,11 @@ const main = async (spec, branch = 'main', opts) => withTempDir(CWD, async (tmpD
   )
 
   const prArgs = [
-    ...nodePrArgs,
-    ...(existingPr
-      ? ['edit', existingPr.number]
-      : ['create', '-H', `${npmHost.user}:${npmBranch}`]
-    ),
+    nodePrArgs,
+    (existingPr ? ['edit', existingPr.number] : ['create', '-H', `${npmHost.user}:${npmBranch}`]),
     '-B', nodeBranch,
     '-t', npmMessage(),
-  ]
+  ].flat()
 
   if (dryRun) {
     log.info(`gh ${prArgs.join(' ')}`)
@@ -248,13 +249,13 @@ const main = async (spec, branch = 'main', opts) => withTempDir(CWD, async (tmpD
     return prBody
   }
 
-  const newOrUpdatedPr = await gh(...prArgs, '-F', '-', { input: prBody, out: true })
+  const newOrUpdatedPr = await gh(prArgs, '-F', '-', { input: prBody, out: true })
   const closeMessage = `Closing in favor of ${newOrUpdatedPr}`
 
   for (const closePr of closePrs) {
     log.info('Attempting to close PR', closePr.url)
     try {
-      await gh(...nodePrArgs, 'close', closePr.number, '-c', closeMessage)
+      await gh(nodePrArgs, 'close', closePr.number, '-c', closeMessage)
     } catch (err) {
       log.error('Could not close PR', err)
     }
