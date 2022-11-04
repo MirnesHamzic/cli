@@ -42,6 +42,9 @@ const createNodeTarball = async ({ mani, registryOnly, tag, dir: extractDir }) =
 }
 
 const main = async (spec, branch = 'main', opts) => withTempDir(CWD, async (tmpDir) => {
+  const { GITHUB_TOKEN } = process.env
+  const { dryRun, registryOnly } = opts
+
   if (!spec) {
     throw new Error('`spec` is required as the first argument')
   }
@@ -50,14 +53,20 @@ const main = async (spec, branch = 'main', opts) => withTempDir(CWD, async (tmpD
     throw new Error('`branch` is required as the second argument')
   }
 
-  const { dryRun, registryOnly } = opts
+  if (!GITHUB_TOKEN) {
+    throw new Error(`process.env.GITHUB_TOKEN is required`)
+  }
 
   const mani = await pacote.manifest(`npm@${spec}`, { preferOnline: true })
 
+  const headHost = hgi.fromUrl('npm/node')
+  const headRemoteUrl = new URL(headHost.https())
+  headRemoteUrl.username = GITHUB_TOKEN
   const head = {
     tag: `v${mani.version}`,
     branch: `npm-v${mani.version}`,
-    host: hgi.fromUrl('npm/node'),
+    host: headHost,
+    remoteUrl: headRemoteUrl.toString(),
     message: `deps: upgrade npm to ${mani.version}`,
   }
   log.silly(head)
@@ -96,8 +105,9 @@ const main = async (spec, branch = 'main', opts) => withTempDir(CWD, async (tmpD
   await gitNode('commit', '-m', head.message)
   await gitNode('rebase', '--whitespace', 'fix', base.branch)
 
-  await gitNode('remote', 'add', head.host.user, head.host.ssh(), { ok: true })
-  await gitNode('push', head.host.user, head.branch, '--force')
+  await gitNode('remote', 'rm', head.host.user, { ok: true })
+  await gitNode('remote', 'add', head.host.user, head.remoteUrl, { ok: true })
+  await gitNode('push', head.host.user, head.branch, '--force-with-lease')
 
   const notes = await gh.json('release', 'view', head.tag, 'body')
   log.silly('body', notes)
@@ -112,8 +122,8 @@ const main = async (spec, branch = 'main', opts) => withTempDir(CWD, async (tmpD
 
   if (dryRun) {
     log.info(`gh ${prArgs.join(' ')}`)
-    const url = new URL(base.host.browse())
     const compare = `${base.branch}...${head.host.user}:${head.host.project}:${head.branch}`
+    const url = new URL(base.host.browse())
     url.pathname += `/compare/${compare}`
     url.searchParams.set('expand', '1')
     return url.toString()
